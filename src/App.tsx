@@ -58,6 +58,79 @@ const getImageSize1 = async (files: File[]): Promise<string> => {
   return log
 }
 
+class BufferedReader {
+  private blob: Blob
+  private chunkSize: number
+  private current: number = 0
+  private cachePos: number = 0
+  private cache: Uint8Array|null = null
+  constructor(blob: Blob, chunkSize: number) {
+    this.blob = blob
+    this.chunkSize = chunkSize
+  }
+  advance(ptr: number) {
+    this.current += ptr
+  }
+  async slice(start: number, end: number): Promise<Uint8Array> {
+    if (start + this.current >= this.cachePos && end + this.current < this.cachePos && this.cache !== null) {
+      return this.cache.slice(start + this.current - this.cachePos, end + this.current - this.cachePos)
+    }
+    if (this.chunkSize <= end - start) {
+      throw new Error("too large slice")
+    }
+    this.cachePos = start + this.current
+    this.cache = new Uint8Array(await this.blob.slice(this.cachePos, end + this.current).arrayBuffer())
+    return this.cache.slice(0, end - start)
+  }
+}
+
+const getImageSize2 = async (files: File[]): Promise<string> => {
+  console.log("start")
+  let log = "";
+  const start = window.performance.now()
+  for (const file of files) {
+    let current = 0;
+    let seenSegment = 0
+    const header = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    if (header[0] !== 0xFF || header[1] !== 0xD8) {
+      log += `${file.name}: not jpeg\n`
+      continue;
+    }
+    current += 2;
+    while(true) {
+      const segmentHeader = new Uint8Array(await file.slice(current, current + 4).arrayBuffer());
+      // console.log(segmentHeader)
+      if (segmentHeader[0] !== 0xFF) {
+        log += `${file.name}: invalid segment header\n`
+        break;
+      }
+      const segmentType = segmentHeader[1];
+      const segmentSize = new DataView(segmentHeader.slice(2, 4).buffer).getUint16(0);
+      if (segmentType >= 0xC0 && segmentType <= 0xCF) {
+        // SOF
+        // P: 1byte
+        // Y: 2byte
+        // X: 2byte
+        const segmentData = new Uint8Array(await file.slice(current + 4, current + 9).arrayBuffer());
+        const y = new DataView(segmentData.slice(1, 3).buffer).getUint16(0);
+        const x = new DataView(segmentData.slice(3, 5).buffer).getUint16(0);
+        log += `${file.name}: ${x}x${y}\n`
+        break;
+      }
+      current += segmentSize + 2;
+      seenSegment++;
+      if (seenSegment >= 1000) {
+        console.log("too many segment")
+        break;
+      }
+    }
+  }
+  const end = window.performance.now()
+  log += `time: ${end - start}ms`
+  console.log("end")
+  return log
+}
+
 function App() {
   const [log, setLog] = useState<string>("");
   const [log2, setLog2] = useState<string>("");
@@ -69,8 +142,11 @@ function App() {
     e.preventDefault()
     e.stopPropagation();
     const items = e.dataTransfer.items;
+    setLog("");
+    setLog2("");
     (async () => {
       const files = await getFiles(items);
+      setLog2(await getImageSize2(files))
       setLog(await getImageSize1(files))
     })()
   }
