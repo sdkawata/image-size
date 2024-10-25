@@ -1,3 +1,4 @@
+import pLimit from 'p-limit'
 import { DragEvent, useState } from 'react'
 
 const readAllEntries = async (dir: FileSystemDirectoryEntry): Promise<FileSystemEntry[]> => {
@@ -42,18 +43,21 @@ const getImageSize1 = async (files: File[]): Promise<string> => {
   console.log("start")
   let log = "";
   const start = window.performance.now()
-  for (const file of files) {
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    await new Promise<void>(resolve => {
-      img.onload = () => {
-        log += `${file.name}: ${img.width}x${img.height}\n`
-        resolve()
-      }
-    })
-  }
+  const limit = pLimit(10)
+  await Promise.all(
+    files.map(file => limit(async () => {
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+      await new Promise<void>(resolve => {
+        img.onload = () => {
+          log += `${file.name}: ${img.width}x${img.height}\n`
+          resolve()
+        }
+      })
+    }))
+  )
   const end = window.performance.now()
-  log += `time: ${end - start}ms`
+  log = `time: ${end - start}ms\n` + log
   console.log("end")
   return log
 }
@@ -72,7 +76,6 @@ class BufferedReader {
     this.current += ptr
   }
   async slice(start: number, end: number): Promise<Uint8Array> {
-    console.log(start, end, this.current, this.cachePos)
     if (start + this.current >= this.cachePos && end + this.current < this.cachePos + this.chunkSize && this.cache !== null) {
       return this.cache.slice(start + this.current - this.cachePos, end + this.current - this.cachePos)
     }
@@ -85,50 +88,55 @@ class BufferedReader {
   }
 }
 
-const getImageSize2 = async (files: File[]): Promise<string> => {
-  console.log("start")
-  let log = "";
-  const start = window.performance.now()
-  for (const file of files) {
-    let seenSegment = 0
-    const reader = new BufferedReader(file, 65536)
-    const header = new Uint8Array(await reader.slice(0, 2));
-    if (header[0] !== 0xFF || header[1] !== 0xD8) {
-      log += `${file.name}: not jpeg\n`
-      continue;
+const getImageSizeFromBlob = async (file: Blob): Promise<{x:number,y:number}|null> => {
+  let seenSegment = 0
+  const reader = new BufferedReader(file, 65536)
+  const header = new Uint8Array(await reader.slice(0, 2));
+  if (header[0] !== 0xFF || header[1] !== 0xD8) {
+    return null;
+  }
+  reader.advance(2)
+  while(true) {
+    const segmentHeader = new Uint8Array(await reader.slice(0, 4));
+    console.log(segmentHeader)
+    if (segmentHeader[0] !== 0xFF) {
+      return null;
     }
-    reader.advance(2)
-    while(true) {
-      const segmentHeader = new Uint8Array(await reader.slice(0, 4));
-      console.log(segmentHeader)
-      if (segmentHeader[0] !== 0xFF) {
-        log += `${file.name}: invalid segment header\n`
-        break;
-      }
-      const segmentType = segmentHeader[1];
-      const segmentSize = new DataView(segmentHeader.slice(2, 4).buffer).getUint16(0);
-      if (segmentType >= 0xC0 && segmentType <= 0xCF) {
-        // SOF
-        // P: 1byte
-        // Y: 2byte
-        // X: 2byte
-        reader.advance(4);
-        const segmentData = new Uint8Array(await reader.slice(0, 5));
-        const y = new DataView(segmentData.slice(1, 3).buffer).getUint16(0);
-        const x = new DataView(segmentData.slice(3, 5).buffer).getUint16(0);
-        log += `${file.name}: ${x}x${y}\n`
-        break;
-      }
-      reader.advance(segmentSize + 2)
-      seenSegment++;
-      if (seenSegment >= 1000) {
-        console.log("too many segment")
-        break;
-      }
+    const segmentType = segmentHeader[1];
+    const segmentSize = new DataView(segmentHeader.slice(2, 4).buffer).getUint16(0);
+    if (segmentType >= 0xC0 && segmentType <= 0xCF) {
+      // SOF
+      // P: 1byte
+      // Y: 2byte
+      // X: 2byte
+      reader.advance(4);
+      const segmentData = new Uint8Array(await reader.slice(0, 5));
+      const y = new DataView(segmentData.slice(1, 3).buffer).getUint16(0);
+      const x = new DataView(segmentData.slice(3, 5).buffer).getUint16(0);
+      return {x, y}
+    }
+    reader.advance(segmentSize + 2)
+    seenSegment++;
+    if (seenSegment >= 1000) {
+      return null;
     }
   }
+}
+
+const getImageSize2 = async (files: File[]): Promise<string> => {
+  const start = window.performance.now()
+  let log = "";
+  const limit = pLimit(10)
+  await Promise.all(files.map(file => limit(async () => {
+    const result = await getImageSizeFromBlob(file)
+    if (result !== null) {
+      log += `${file.name}: ${result.x}x${result.y}\n`
+    } else {
+      log += `${file.name}: error\n`
+    }
+  })))
   const end = window.performance.now()
-  log += `time: ${end - start}ms`
+  log = `time: ${end - start}ms\n` + log
   console.log("end")
   return log
 }
