@@ -72,14 +72,15 @@ class BufferedReader {
     this.current += ptr
   }
   async slice(start: number, end: number): Promise<Uint8Array> {
-    if (start + this.current >= this.cachePos && end + this.current < this.cachePos && this.cache !== null) {
+    console.log(start, end, this.current, this.cachePos)
+    if (start + this.current >= this.cachePos && end + this.current < this.cachePos + this.chunkSize && this.cache !== null) {
       return this.cache.slice(start + this.current - this.cachePos, end + this.current - this.cachePos)
     }
     if (this.chunkSize <= end - start) {
       throw new Error("too large slice")
     }
     this.cachePos = start + this.current
-    this.cache = new Uint8Array(await this.blob.slice(this.cachePos, end + this.current).arrayBuffer())
+    this.cache = new Uint8Array(await this.blob.slice(this.cachePos, this.cachePos + this.chunkSize).arrayBuffer())
     return this.cache.slice(0, end - start)
   }
 }
@@ -89,17 +90,17 @@ const getImageSize2 = async (files: File[]): Promise<string> => {
   let log = "";
   const start = window.performance.now()
   for (const file of files) {
-    let current = 0;
     let seenSegment = 0
-    const header = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    const reader = new BufferedReader(file, 65536)
+    const header = new Uint8Array(await reader.slice(0, 2));
     if (header[0] !== 0xFF || header[1] !== 0xD8) {
       log += `${file.name}: not jpeg\n`
       continue;
     }
-    current += 2;
+    reader.advance(2)
     while(true) {
-      const segmentHeader = new Uint8Array(await file.slice(current, current + 4).arrayBuffer());
-      // console.log(segmentHeader)
+      const segmentHeader = new Uint8Array(await reader.slice(0, 4));
+      console.log(segmentHeader)
       if (segmentHeader[0] !== 0xFF) {
         log += `${file.name}: invalid segment header\n`
         break;
@@ -111,13 +112,14 @@ const getImageSize2 = async (files: File[]): Promise<string> => {
         // P: 1byte
         // Y: 2byte
         // X: 2byte
-        const segmentData = new Uint8Array(await file.slice(current + 4, current + 9).arrayBuffer());
+        reader.advance(4);
+        const segmentData = new Uint8Array(await reader.slice(0, 5));
         const y = new DataView(segmentData.slice(1, 3).buffer).getUint16(0);
         const x = new DataView(segmentData.slice(3, 5).buffer).getUint16(0);
         log += `${file.name}: ${x}x${y}\n`
         break;
       }
-      current += segmentSize + 2;
+      reader.advance(segmentSize + 2)
       seenSegment++;
       if (seenSegment >= 1000) {
         console.log("too many segment")
